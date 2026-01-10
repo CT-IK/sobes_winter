@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/CT-IK/sobes_winter/internal/app"
+	"github.com/CT-IK/sobes_winter/pkg/db"
 	"github.com/go-telegram/bot"
 	"github.com/joho/godotenv"
 )
@@ -26,6 +28,13 @@ func main() {
 		fmt.Printf("Failed to create bot: %v\n", err)
 		os.Exit(-1)
 	}
+
+	_, err = db.Initialize(db.NewProdConfig("sqlite3", "file:database.db"))
+	if err != nil {
+		fmt.Printf("Failed to init database: %v\n", err)
+		os.Exit(-1)
+	}
+	defer db.Close()
 
 	app.RegisterUserHandlers(b)
 	app.RegisterAdminHandlers(b)
