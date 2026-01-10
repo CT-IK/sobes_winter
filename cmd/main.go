@@ -29,14 +29,14 @@ func main() {
 		os.Exit(-1)
 	}
 
-	_, err = db.Initialize(db.NewProdConfig("sqlite3", "file:database.db"))
+	_, err = db.Initialize(db.NewProdConfig("sqlite3", "file:data/database.db"))
 	if err != nil {
 		fmt.Printf("Failed to init database: %v\n", err)
 		os.Exit(-1)
 	}
 	defer db.Close()
 
-	app.RegisterUserHandlers(b)
+	app.RegisterUserHandlers(ctx, b)
 	app.RegisterAdminHandlers(b)
 
 	fmt.Println("Bot started...")

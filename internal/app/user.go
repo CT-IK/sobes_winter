@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/CT-IK/sobes_winter/pkg/db"
+	"github.com/go-co-op/gocron"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 )
@@ -37,7 +38,7 @@ const (
 
 var states map[int64]registrationState
 
-func RegisterUserHandlers(b *bot.Bot) {
+func RegisterUserHandlers(ctx context.Context, b *bot.Bot) {
 	states = make(map[int64]registrationState)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "start", bot.MatchTypeCommand, greetingsHandler)
 
@@ -71,6 +72,50 @@ func RegisterUserHandlers(b *bot.Bot) {
 	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
 		return update.CallbackQuery != nil && states[update.CallbackQuery.From.ID].step == registrationStepConfirm
 	}, confirmButtonHandler)
+
+	s := gocron.NewScheduler(time.UTC)
+	s.Every(1).Minute().Do(func() {
+		rows, err := db.Get().Query("SELECT time, telegram_user_id, telegram_admin_id FROM notifications")
+		if err != nil {
+			log.Fatal("Failed to execute SELECT query")
+			return
+		}
+		defer rows.Close()
+
+		type notification struct {
+			userID  int64
+			adminID int64
+		}
+
+		notificationsToDelete := make([]notification, 0)
+		for rows.Next() {
+			var timeString string
+			var userId int64
+			var adminId int64
+			err = rows.Scan(&timeString, &userId, &adminId)
+			if err != nil {
+				log.Fatal("Failed to scan query: ", err)
+			}
+
+			gmtPlus3 := time.FixedZone("GMT+3", 3*60*60)
+			notificationTime, _ := time.ParseInLocation("2006-01-02 15:04:05.000", timeString, gmtPlus3)
+
+			if time.Now().In(gmtPlus3).After(notificationTime) {
+				notificationsToDelete = append(notificationsToDelete, notification{userID: userId, adminID: adminId})
+			}
+		}
+
+		for _, notif := range notificationsToDelete {
+			sendMessage(ctx, b, notif.userID, "Напоминаем о собеседовании через 5 часов!", nil)
+			sendMessage(ctx, b, notif.adminID, "Напоминаем о собеседовании через 5 часов!", nil)
+
+			_, err = db.Get().Exec("DELETE FROM notifications WHERE telegram_user_id = ? AND telegram_admin_id = ?", notif.userID, notif.adminID)
+			if err != nil {
+				log.Println("Failed to execute DELETE query")
+			}
+		}
+	})
+	s.StartAsync()
 }
 
 func chooseContent() (string, *models.InlineKeyboardMarkup) {
@@ -93,6 +138,7 @@ func myProfileContent(telegramId int64) (string, *models.InlineKeyboardMarkup) {
 		log.Fatal("Failed to execute SELECT query")
 		return "", nil
 	}
+	defer registrations.Close()
 
 	for registrations.Next() {
 		text = "Ваши записи"
@@ -167,7 +213,11 @@ func cancelRegistrationButtonHandler(ctx context.Context, b *bot.Bot, update *mo
 		return
 	}
 
-	sendMessage(ctx, b, update.CallbackQuery.Message.Message.Chat.ID, "Запись отменена", nil)
+	_, err = db.Get().Exec("DELETE FROM notifications WHERE telegram_user_id = ? AND telegram_admin_id = ?", update.CallbackQuery.Message.Message.Chat.ID, adminID)
+	if err != nil {
+		log.Println("Failed to execute DELETE query")
+		return
+	}
 
 	messageToAdmin := fmt.Sprintf("Запись на %s с %s до %s отменена\n", date, timeBegin, timeEnd)
 	if update.CallbackQuery.From.Username == "" {
@@ -177,6 +227,7 @@ func cancelRegistrationButtonHandler(ctx context.Context, b *bot.Bot, update *mo
 	}
 
 	sendMessage(ctx, b, adminID, messageToAdmin, nil)
+	sendMessage(ctx, b, update.CallbackQuery.Message.Message.Chat.ID, "Запись отменена", nil)
 }
 
 func registerContent() (string, *models.InlineKeyboardMarkup) {
@@ -215,8 +266,11 @@ func registerButtonHandler(ctx context.Context, b *bot.Bot, update *models.Updat
 }
 
 func greetingsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
-	sendMessage(ctx, b, update.Message.Chat.ID, "Привет! Это бот для записи на собеседования в комитеты Студенческого Совета Финансового университета.", nil)
+	tempState := states[update.Message.From.ID]
+	tempState.step = registrationStepNone
+	states[update.Message.From.ID] = tempState
 
+	sendMessage(ctx, b, update.Message.Chat.ID, "Привет! Это бот для записи на собеседования в комитеты Студенческого Совета Финансового университета.", nil)
 	text, kb := chooseContent()
 	sendMessage(ctx, b, update.Message.Chat.ID, text, kb)
 }
@@ -402,7 +456,7 @@ func confirmButtonHandler(ctx context.Context, b *bot.Bot, update *models.Update
 
 	beginTime := tempState.datetimeBegin.Format("2006-01-02 15:04:05.000")
 	endTime := tempState.datetimeEnd.Format("2006-01-02 15:04:05.000")
-	_, err = db.Get().Exec("INSERT INTO registrations (telegram_id, telegram_username, direction, datetime_begin, datetime_end) VALUES(?, ?, ?, ?, ?)", tempState.id, tempState.direction, beginTime, endTime)
+	_, err = db.Get().Exec("INSERT INTO registrations (telegram_id, telegram_username, direction, datetime_begin, datetime_end) VALUES(?, ?, ?, ?, ?)", tempState.id, tempState.username, tempState.direction, beginTime, endTime)
 	if err != nil {
 		log.Println("Failed to execute INSERT INTO query")
 		return
@@ -421,7 +475,11 @@ func confirmButtonHandler(ctx context.Context, b *bot.Bot, update *models.Update
 		return
 	}
 
-	sendMessage(ctx, b, update.CallbackQuery.Message.Message.Chat.ID, "Вы записаны", nil)
+	_, err = db.Get().Exec("INSERT INTO notifications (telegram_user_id, telegram_admin_id, time) VALUES(?, ?, ?)", tempState.id, adminID, tempState.datetimeBegin.Add(-5*time.Hour).Format("2006-01-02 15:04:05.000"))
+	if err != nil {
+		log.Println("Failed to execute INSERT INTO query: ", err)
+		return
+	}
 
 	messageToAdmin := fmt.Sprintf("Новая запись на %s с %s до %s\n", tempState.datetimeBegin.Format("02.01.2006"), tempState.datetimeBegin.Format("15:04"), tempState.datetimeEnd.Format("15:04"))
 	if tempState.username == "" {
@@ -431,4 +489,5 @@ func confirmButtonHandler(ctx context.Context, b *bot.Bot, update *models.Update
 	}
 
 	sendMessage(ctx, b, adminID, messageToAdmin, nil)
+	sendMessage(ctx, b, update.CallbackQuery.Message.Message.Chat.ID, "Вы записаны", nil)
 }

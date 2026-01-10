@@ -89,6 +89,14 @@ func checkEntriesContent(direction string) (string, *models.InlineKeyboardMarkup
 		}
 	}
 
+	if len(registrations) == 0 {
+		return "Нет записей", &models.InlineKeyboardMarkup{
+			InlineKeyboard: [][]models.InlineKeyboardButton{
+				{{Text: "Назад", CallbackData: "button_admin_home"}},
+			},
+		}
+	}
+
 	return outputMessage.String(), &models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{
 			{{Text: "Назад", CallbackData: "button_admin_home"}},
@@ -203,6 +211,10 @@ func adminGreetingsHandler(ctx context.Context, b *bot.Bot, update *models.Updat
 		// if user is not an admin then we just silently fall
 		return
 	}
+
+	tempState := states[update.Message.From.ID]
+	tempState.step = registrationStepNone
+	states[update.Message.From.ID] = tempState
 
 	b.SendMessage(ctx, &bot.SendMessageParams{
 		Text:   "Админский функционал",
